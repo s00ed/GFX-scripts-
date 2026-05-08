@@ -15,7 +15,7 @@
     var PREVIEW_LAYER = "RM_PREVIEW_DO_NOT_PRINT";
     var FINAL_LAYER = "REGISTRATION MARKS";
 
-    var win = new Window("dialog", "Minimal RM Tool V3");
+    var win = new Window("dialog", "Minimal RM Tool V4");
     win.orientation = "column";
     win.alignChildren = ["fill", "top"];
     win.spacing = 8;
@@ -171,7 +171,8 @@
             cbGapInput.text = "1.5";
             cbFontInput.text = "7";
         } else {
-            scopeDrop.selection = 1;
+            // Clothes Film now uses artwork automatically from target artboard.
+            scopeDrop.selection = 0;
             countDrop.selection = 1;
             shapeDrop.selection = 1;
             sizeInput.text = "7";
@@ -263,11 +264,6 @@
             return;
         }
 
-        if (!isDecal && !selectionBounds) {
-            alert("Clothes Film mode needs selected artwork.");
-            return;
-        }
-
         var layerName = isPreview ? PREVIEW_LAYER : FINAL_LAYER;
         var layer = getCleanLayer(layerName);
 
@@ -284,11 +280,24 @@
 
         var regColor = registrationColor();
         var totalMarks = 0;
+        var skippedArtboards = [];
 
         for (var t = 0; t < targets.length; t++) {
             var abIndex = targets[t];
             var artBounds = getArtboardBoundsByIndex(abIndex);
-            var baseBounds = isDecal ? artBounds : selectionBounds;
+
+            var baseBounds;
+
+            if (isDecal) {
+                baseBounds = artBounds;
+            } else {
+                baseBounds = getArtworkBoundsForArtboard(abIndex);
+
+                if (!baseBounds) {
+                    skippedArtboards.push(abIndex + 1);
+                    continue;
+                }
+            }
 
             var positions = isDecal
                 ? decalPositions(baseBounds, size, offset, count)
@@ -352,45 +361,101 @@
         app.redraw();
 
         if (!isPreview) {
-            alert(
+            var msg =
                 "Done.\n\n" +
                 "Target artboards: " + targets.length + "\n" +
                 "Registration marks: " + totalMarks + " grouped marks\n" +
                 "Bleed Guide: " + (bleedCheck.value ? "Added" : "Off") + "\n" +
                 "Color Bar: " + (colorBarCheck.value ? "Added" : "Off") + "\n" +
                 "Layer locked: " + (lockFinalLayerCheck.value ? "Yes" : "No") + "\n" +
-                "Document mode: CMYK"
-            );
+                "Document mode: CMYK";
+
+            if (skippedArtboards.length > 0) {
+                msg += "\n\nSkipped empty artboards: " + skippedArtboards.join(", ");
+            }
+
+            alert(msg);
         }
     }
 
     function getTargetArtboardIndexes(isDecal, selectionBounds) {
         var result = [];
 
-        if (isDecal) {
-            if (scopeDrop.selection.index === 2) {
-                for (var i = 0; i < doc.artboards.length; i++) {
-                    result.push(i);
-                }
-                return result;
+        if (scopeDrop.selection.index === 2) {
+            for (var i = 0; i < doc.artboards.length; i++) {
+                result.push(i);
             }
-
-            if (scopeDrop.selection.index === 1 && selectionBounds) {
-                result.push(findBestArtboardForBounds(selectionBounds));
-                return result;
-            }
-
-            result.push(doc.artboards.getActiveArtboardIndex());
             return result;
         }
 
-        if (selectionBounds) {
-            result.push(findBestArtboardForBounds(selectionBounds));
-        } else {
-            result.push(doc.artboards.getActiveArtboardIndex());
+        if (scopeDrop.selection.index === 1) {
+            if (selectionBounds) {
+                result.push(findBestArtboardForBounds(selectionBounds));
+            } else {
+                result.push(doc.artboards.getActiveArtboardIndex());
+            }
+            return result;
         }
 
+        result.push(doc.artboards.getActiveArtboardIndex());
         return result;
+    }
+
+    function getArtworkBoundsForArtboard(abIndex) {
+        var ab = getArtboardBoundsByIndex(abIndex);
+        var b = null;
+
+        for (var i = 0; i < doc.pageItems.length; i++) {
+            var item = doc.pageItems[i];
+
+            if (!isRealArtworkItem(item)) {
+                continue;
+            }
+
+            var ib;
+
+            try {
+                var vb = item.visibleBounds;
+
+                ib = {
+                    left: vb[0],
+                    top: vb[1],
+                    right: vb[2],
+                    bottom: vb[3]
+                };
+            } catch (eBounds) {
+                continue;
+            }
+
+            if (intersectionArea(ib, ab) > 0 || boundsCenterInside(ib, ab)) {
+                b = unionBounds(b, ib);
+            }
+        }
+
+        return b;
+    }
+
+    function isRealArtworkItem(item) {
+        try {
+            if (!item) return false;
+            if (item.hidden) return false;
+            if (item.guides) return false;
+        } catch (e0) {}
+
+        try {
+            if (!item.layer.visible) return false;
+            if (item.layer.name === PREVIEW_LAYER) return false;
+            if (item.layer.name === FINAL_LAYER) return false;
+        } catch (e1) {}
+
+        try {
+            if (item.name && item.name.indexOf("AB") === 0 && item.name.indexOf("_RM_") >= 0) return false;
+            if (item.name && item.name.indexOf("COLOR_BAR") >= 0) return false;
+            if (item.name && item.name.indexOf("BLEED_GUIDE") >= 0) return false;
+            if (item.name && item.name.indexOf("RM_part") >= 0) return false;
+        } catch (e2) {}
+
+        return true;
     }
 
     function findBestArtboardForBounds(b) {
@@ -439,6 +504,18 @@
         }
 
         return w * h;
+    }
+
+    function boundsCenterInside(inner, outer) {
+        var cx = (inner.left + inner.right) / 2;
+        var cy = (inner.top + inner.bottom) / 2;
+
+        return (
+            cx >= outer.left &&
+            cx <= outer.right &&
+            cy <= outer.top &&
+            cy >= outer.bottom
+        );
     }
 
     function createOneGroupedMark(layer, groupName, x, y, pos, size, strokePT, color, shape) {
